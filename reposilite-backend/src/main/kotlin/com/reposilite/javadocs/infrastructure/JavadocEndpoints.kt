@@ -20,6 +20,7 @@ import com.reposilite.javadocs.JavadocFacade
 import com.reposilite.javadocs.api.JavadocPageRequest
 import com.reposilite.javadocs.api.JavadocRawRequest
 import com.reposilite.maven.infrastructure.MavenRoutes
+import com.reposilite.maven.RepositoryVisibility.PRIVATE
 import com.reposilite.shared.extensions.encoding
 import com.reposilite.storage.api.Location
 import com.reposilite.web.api.ReposiliteRoute
@@ -42,6 +43,7 @@ internal class JavadocEndpoints(
         accessed {
             requireGav { gav ->
                 requireRepository { repository ->
+                    if (repository.visibility == PRIVATE) ctx.header("Cache-Control", "no-store")
                     when {
                         uri.endsWith("/") -> ctx.redirect(uri.dropLast(1))
                         else -> {
@@ -70,24 +72,22 @@ internal class JavadocEndpoints(
         accessed {
             requireGav { gav ->
                 requireRepository { repository ->
+                    if (repository.visibility == PRIVATE) ctx.header("Cache-Control", "no-store")
+                    ctx.header("Referrer-Policy", "no-referrer")
+                    ctx.header(Header.CONTENT_SECURITY_POLICY, "sandbox allow-scripts")
                     response = Location.ofRequest(requireParameter("resource"))
                         .flatMap { resource ->
-                            javadocFacade.findRawJavadocResource(
-                                JavadocRawRequest(
-                                    accessToken = this?.identifier,
-                                    repository = repository,
-                                    gav = gav,
-                                    resource = resource,
-                                )
-                            )
+                            val request = JavadocRawRequest(this?.identifier, repository, gav, resource)
+                            if (repository.visibility == PRIVATE && resource.getExtension() == "html" && !javadocFacade.isCapabilityResource(resource)) {
+                                javadocFacade.redirectPrivateRawHtml(request)
+                                    .peek { ctx.redirect(it) }
+                                    .map { Unit }
+                            } else {
+                                javadocFacade.findRawJavadocResource(request)
+                                    .peek { ctx.encoding(Charsets.UTF_8).contentType(it.contentType) }
+                                    .map { it.content }
+                            }
                         }
-                        .peek {
-                            ctx
-                                .encoding(Charsets.UTF_8)
-                                .contentType(it.contentType)
-                                .header(Header.CONTENT_SECURITY_POLICY, "sandbox allow-scripts")
-                        }
-                        .map { it.content }
                 }
             }
         }

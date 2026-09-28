@@ -24,19 +24,26 @@ import com.reposilite.journalist.Journalist
 import com.reposilite.journalist.Logger
 import com.reposilite.maven.MavenFacade
 import com.reposilite.maven.Repository
+import com.reposilite.maven.RepositoryVisibility.PRIVATE
 import com.reposilite.maven.api.VersionLookupRequest
 import com.reposilite.plugin.api.Facade
 import com.reposilite.shared.ErrorResponse
 import com.reposilite.shared.notFound
 import com.reposilite.shared.notFoundError
+import com.reposilite.shared.internalServerError
+import com.reposilite.shared.unauthorized
+import com.reposilite.shared.unauthorizedError
 import com.reposilite.storage.api.Location
 import com.reposilite.token.AccessTokenIdentifier
+import com.reposilite.token.AccessTokenFacade
 import io.javalin.http.ContentType
 import panda.std.Result
 import panda.std.Result.supplyThrowing
 import panda.std.asSuccess
 import panda.utilities.StringUtils
 import java.nio.file.Path
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets.UTF_8
 import kotlin.io.path.exists
 import kotlin.io.path.inputStream
 import kotlin.io.path.notExists
@@ -47,8 +54,10 @@ private const val LATEST_PATTERN = "/latest"
 class JavadocFacade internal constructor(
     private val journalist: Journalist,
     val mavenFacade: MavenFacade,
+    private val accessTokenFacade: AccessTokenFacade,
     private val javadocFolder: Path,
-    private val javadocContainerService: JavadocContainerService
+    private val javadocContainerService: JavadocContainerService,
+    private val viewingCapabilities: JavadocViewingCapabilities = JavadocViewingCapabilities(),
 ) : Journalist, Facade {
 
     private val supportedExtensions = mapOf(
@@ -75,17 +84,83 @@ class JavadocFacade internal constructor(
 
     fun findRawJavadocResource(request: JavadocRawRequest): Result<JavadocRawResponse, ErrorResponse> =
         with (request) {
-            mavenFacade.canAccessResource(accessToken, repository, gav)
-                .flatMap { javadocContainerService.loadContainer(accessToken, repository, gav) }
-                .map { it.javadocUnpackPath.resolve(resource.toString()) }
+            val parts = resource.toString().split("/", limit = 3)
+            val usesCapability = repository.visibility == PRIVATE && parts.first() == "_"
+            val effectiveResource = if (usesCapability && parts.size == 3) Location.of(parts[2]) else resource
+            val authorizedToken: Result<AccessTokenIdentifier?, ErrorResponse> =
+                if (usesCapability) {
+                    if (parts.size != 3) unauthorizedError()
+                    else authorizeCapability(parts[1], repository, gav).map { it }
+                } else {
+                    mavenFacade.canAccessResource(accessToken, repository, gav).map { accessToken }
+                }
+
+            authorizedToken
+                .flatMap { javadocContainerService.loadContainer(it, repository, gav) }
+                .map { it.javadocUnpackPath.resolve(effectiveResource.toString()) }
                 .filter({ it.exists() }, { notFound("Resource $resource not found") })
                 .map {
                     JavadocRawResponse(
-                        contentType = supportedExtensions[resource.getExtension()] ?: ContentType.APPLICATION_OCTET_STREAM,
+                        contentType = supportedExtensions[effectiveResource.getExtension()] ?: ContentType.APPLICATION_OCTET_STREAM,
                         content = it.inputStream()
                     )
                 }
         }
+
+    internal fun isCapabilityResource(resource: Location): Boolean =
+        resource.toString().substringBefore('/') == "_"
+
+    internal fun redirectPrivateRawHtml(request: JavadocRawRequest): Result<String, ErrorResponse> = with(request) {
+        val documentGav = documentGav(resolveGav(JavadocPageRequest(accessToken, repository, gav)))
+        mavenFacade.canAccessResource(accessToken, repository, documentGav)
+            .flatMap { javadocContainerService.loadContainer(accessToken, repository, documentGav) }
+            .filter({ it.javadocUnpackPath.resolve(resource.toString()).exists() }, { notFound("Resource $resource not found") })
+            .flatMap { issueCapability(accessToken, repository, documentGav) }
+            .map { privateRawUrl(repository, documentGav, it, resource) }
+    }
+
+    private fun authorizeCapability(id: String, repository: Repository, gav: Location): Result<AccessTokenIdentifier?, ErrorResponse> {
+        val capability = viewingCapabilities.find(id, repository.name, gav) ?: return unauthorizedError()
+        val token = accessTokenFacade.getAccessTokenDetailsById(capability.accessToken)?.accessToken
+            ?.takeUnless { it.isExpired() }
+            ?.takeIf { it.encryptedSecret == capability.encryptedSecret }
+            ?: return unauthorizedError()
+        return mavenFacade.canAccessResource(token.identifier, repository, gav)
+            .mapErr { unauthorized() }
+            .map { token.identifier }
+    }
+
+    private fun issueCapability(accessToken: AccessTokenIdentifier?, repository: Repository, gav: Location): Result<String, ErrorResponse> {
+        val token = accessToken?.let { accessTokenFacade.getAccessTokenDetailsById(it)?.accessToken }
+            ?.takeUnless { it.isExpired() }
+            ?: return unauthorizedError()
+        return viewingCapabilities.issue(token.identifier, token.encryptedSecret, repository.name, gav).asSuccess()
+    }
+
+    private fun documentGav(gav: Location): Location =
+        if (gav.getExtension() in setOf("jar", "zip")) gav.getParent() else gav
+
+    private fun privateRawUrl(repository: Repository, gav: Location, id: String, resource: Location): String =
+        "/javadoc/${encodePath(repository.name)}/${encodePath(gav.toString())}/raw/_/$id/${encodePath(resource.toString())}"
+
+    private fun encodePath(path: String): String =
+        path.split('/').joinToString("/") { URLEncoder.encode(it, UTF_8).replace("+", "%20") }
+
+    private fun privateViewerHtml(html: String, url: String): Result<JavadocResponse, ErrorResponse> {
+        val unpack = "/.cache/unpack/index.html"
+        val iframe = "src=\"$unpack\""
+        val script = "window.location.href + '$unpack'"
+        val raw = "window.location.href + '/raw/index.html'"
+        if (!html.contains(iframe) || !html.contains(script) || !html.contains(raw)) {
+            return internalServerError("Unexpected cached Javadoc viewer")
+        }
+        return JavadocResponse(
+            ContentType.HTML,
+            html.replace(iframe, "src=\"$url\"")
+                .replace(script, "'$url'")
+                .replace(raw, "'$url'")
+        ).asSuccess()
+    }
 
     private fun createPage(accessToken: AccessTokenIdentifier?, repository: Repository, gav: Location): Result<JavadocResponse, ErrorResponse> {
         val resourcesFile = createPlainFile(javadocFolder, repository, gav)
@@ -108,7 +183,16 @@ class JavadocFacade internal constructor(
             else ->
                 javadocContainerService
                     .loadContainer(accessToken, repository, gav)
-                    .map { JavadocResponse(ContentType.HTML, readFile(it.javadocContainerIndex)) }
+                    .flatMap { container ->
+                        val html = readFile(container.javadocContainerIndex)
+                        if (repository.visibility != PRIVATE) {
+                            JavadocResponse(ContentType.HTML, html).asSuccess()
+                        } else {
+                            val documentGav = documentGav(gav)
+                            issueCapability(accessToken, repository, documentGav)
+                                .flatMap { id -> privateViewerHtml(html, privateRawUrl(repository, documentGav, id, Location.of("index.html"))) }
+                        }
+                    }
         }
     }
 

@@ -31,15 +31,17 @@ import com.reposilite.plugin.facade
 import com.reposilite.plugin.parameters
 import com.reposilite.status.FailureFacade
 import com.reposilite.storage.deleteRecursivelyInside
+import com.reposilite.token.AccessTokenFacade
 import com.reposilite.web.api.RoutingSetupEvent
 import kotlin.io.path.exists
 
-@Plugin(name = "javadoc", dependencies = ["failure", "shared-configuration", "frontend", "maven"], settings = JavadocSettings::class)
+@Plugin(name = "javadoc", dependencies = ["failure", "shared-configuration", "frontend", "maven", "access-token"], settings = JavadocSettings::class)
 internal class JavadocPlugin : ReposilitePlugin() {
 
     override fun initialize(): Facade {
         val failureFacade = facade<FailureFacade>()
         val mavenFacade = facade<MavenFacade>()
+        val accessTokenFacade = facade<AccessTokenFacade>()
         val frontendFacade = facade<FrontendFacade>()
 
         val javadocSettings = facade<SharedConfigurationFacade>().getDomainSettings<JavadocSettings>()
@@ -63,6 +65,7 @@ internal class JavadocPlugin : ReposilitePlugin() {
             journalist = this,
             javadocFolder = javadocFolder,
             mavenFacade = mavenFacade,
+            accessTokenFacade = accessTokenFacade,
             javadocContainerService = javadocContainerService
         )
 
