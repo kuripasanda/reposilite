@@ -56,7 +56,7 @@ internal abstract class JavadocsIntegrationTest : JavadocsIntegrationSpecificati
         assertThat(viewer.status).isEqualTo(200)
         assertThat(viewer.headers.getFirst("Cache-Control")).isEqualTo("no-store")
         assertThat(viewer.headers.getFirst("Content-Security-Policy")).isEqualTo("sandbox allow-scripts")
-        val index = Regex("""src="([^"]+/raw/_/[^\"]+/index\.html)"""").find(viewer.body)!!.groupValues[1]
+        val index = Regex("""src="([^"]+/raw/_/[^"]+/index\.html)"""").find(viewer.body)!!.groupValues[1]
         assertThat(viewer.body).contains("document.getElementById(\"javadoc\").src = '$index'")
         assertThat(viewer.body).contains("document.getElementById('raw').href = '$index'")
         assertThat(viewer.body).doesNotContain("/.cache/unpack/index.html")
@@ -97,7 +97,7 @@ internal abstract class JavadocsIntegrationTest : JavadocsIntegrationSpecificati
         val identifier = tokens.getAccessToken(name)!!.identifier
         fun issue(secret: String): String {
             val html = get("$base$path").basicAuth(name, secret).asString().body
-            return Regex("""src="([^"]+/raw/_/[^\"]+/index\.html)"""").find(html)!!.groupValues[1]
+            return Regex("""src="([^"]+/raw/_/[^"]+/index\.html)"""").find(html)!!.groupValues[1]
         }
 
         val revokedRoute = issue(secret)
